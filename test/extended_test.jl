@@ -134,10 +134,10 @@ function sim_multi_modal_expression_and_fit_model()
     return model, graph
 end
 
-function sim_cyclic_expression_and_fit_model()
+function sim_cyclic_expression_and_fit_model(n_replicates_per_donor::Int64 = 10)
     true_grn = cyclic_chain_graph()
     # true_grn = big_tmp_grn()
-    expression = sim_cyclic_expression(true_grn, 3, 150, true)
+    expression = sim_cyclic_expression(true_grn, 3, n_replicates_per_donor, true)
     graph = interventionGraph(expression)
     model_pars = get_model_params(false, .01, .01)
     sampling_pars = get_sampling_params(true)
@@ -146,8 +146,77 @@ function sim_cyclic_expression_and_fit_model()
     parsed = parse_cyclic_chain(
         model[1], model[2], cyclic_matrices[3]; targets=["gene_$i" for i in 1:graph.nv]
     )
-    return model, graph, parsed
-    # return model[1], model[2], cyclic_matrices[3]
+    # return model, graph, parsed
+    return parsed
+end
+
+function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64 = 50)
+
+    truth = cyclic_chain_graph() .> 0
+    true_edges = Array{Tuple{String, String}}(undef, 0)
+    for i in 1:size(truth, 1)
+        for j in 1:size(truth, 2)
+            if truth[i, j]
+                edge = ("gene_$i", "gene_$j")
+                push!(true_edges, edge)
+            end
+        end
+    end
+
+    true_edges = Set(true_edges)
+    println("true_edges")
+    println(true_edges)
+
+    TP_vec = []
+    TPR_vec = []
+    FD_vec = []
+    FDR_vec = []
+    thresh_vec = []
+
+    n_replicates_vec = []
+
+    for n_replicates in n_replicates_seq
+        for i in 1:n_sims
+            for thresh in [0.90, 0.95, .99]
+                @info "n_replicates = $n_replicates, i = $i, thresh = $thresh"
+                parsed = sim_cyclic_expression_and_fit_model(n_replicates)
+
+                estimated_edges = []
+                detected_rows = parsed[parsed.PIP .> thresh, :]
+                detected_edges = collect(zip(detected_rows.row, detected_rows.col))
+
+                println("detected_edges")
+                println(detected_edges)
+
+                TP = length(intersect(true_edges, detected_edges))
+                push!(TP_vec, TP)
+                TPR = TP / length(true_edges)
+                push!(TPR_vec, TPR)
+
+                FD = length(setdiff(detected_edges, true_edges))
+                push!(FD_vec, FD)
+                FDR = FD / length(detected_edges)
+                push!(FDR_vec, FDR)
+
+                push!(n_replicates_vec, n_replicates)
+
+                push!(thresh_vec, thresh)
+            end
+        end
+    end
+
+    res = DataFrame(
+        n_replicates = n_replicates_vec,
+        PIP = thresh_vec,
+        TP = TP_vec,
+        TPR = TPR_vec,
+        FD = FD_vec,
+        FDR = FDR_vec
+    )
+
+    write(joinpath(test_out_dir(), "simulation_infer_cylic_model_vary_replicates_PIP.csv"), res)
+
+    return res
 end
 
 function sim_cyclic_expression(true_adjacency::Matrix{Float64}, n_donors::Int64 = 3, n_replicates_per_donor::Int64 = 50, include_controls=false)
