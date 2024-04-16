@@ -2,7 +2,7 @@ using Distributions
 using LinearAlgebra: I
 # using InferCausalGraph: d_connected_advi, parse_symbol_map
 # using InferCausalGraph: interventionGraph, fit_model, get_model_params, get_sampling_params, DAGScorer, bge, fit_cyclic_model, get_cyclic_matrices, parse_cyclic_chain
-using InferCausalGraph: interventionGraph, fit_model, get_model_params, get_sampling_params, fit_cyclic_model, get_cyclic_matrices, parse_cyclic_chain, linear_regress
+using InferCausalGraph: interventionGraph, fit_model, get_model_params, get_sampling_params, fit_cyclic_model, get_cyclic_matrices, parse_cyclic_chain, linear_regress, estimate_total_effects
 using Statistics: var, std, cor, cov
 using Formatting: sprintf1
 using DataFrames: DataFrame, rename!, vcat
@@ -10,6 +10,7 @@ using CSV: write, read
 using Dates: now
 using Turing: setprogress!
 using Test
+import Base: push!
 
 
 setprogress!(true)
@@ -150,13 +151,37 @@ function sim_cyclic_expression_and_fit_model(n_replicates_per_donor::Int64 = 10)
     return parsed
 end
 
-function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64 = 50)
+function parse_total_effect_estimates(g::interventionGraph)
+    estimates = estimate_total_effects(g, false)
 
-    truth = cyclic_chain_graph() .> 0
+    nv = size(estimates, 1)
+    result = DataFrame()
+
+    for c in 1:nv
+        for r in 1:nv 
+            if c == r
+                continue
+            end
+            row = (;
+                :row => "gene_$r", 
+                :col => "gene_$c", 
+                :estimate => estimates[r, c]
+            )
+
+            push!(result, row)
+
+        end
+    end
+
+    return result
+end
+
+function parse_graph_to_edges(β::BitMatrix)
+
     true_edges = Array{Tuple{String, String}}(undef, 0)
-    for i in 1:size(truth, 1)
-        for j in 1:size(truth, 2)
-            if truth[i, j]
+    for i in 1:size(β, 1)
+        for j in 1:size(β, 2)
+            if β[i, j]
                 edge = ("gene_$i", "gene_$j")
                 push!(true_edges, edge)
             end
@@ -164,8 +189,14 @@ function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64
     end
 
     true_edges = Set(true_edges)
-    println("true_edges")
-    println(true_edges)
+
+    return true_edges
+end
+
+function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64 = 50)
+
+    truth = cyclic_chain_graph() .> 0
+    true_edges = parse_graph_to_edges(truth)
 
     TP_vec = []
     TPR_vec = []
@@ -181,13 +212,8 @@ function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64
                 @info "n_replicates = $n_replicates, i = $i, thresh = $thresh"
                 parsed = sim_cyclic_expression_and_fit_model(n_replicates)
 
-                estimated_edges = []
                 detected_rows = parsed[parsed.PIP .> thresh, :]
                 detected_edges = collect(zip(detected_rows.row, detected_rows.col))
-
-                println("detected_edges")
-                println(detected_edges)
-
                 TP = length(intersect(true_edges, detected_edges))
                 push!(TP_vec, TP)
                 TPR = TP / length(true_edges)
@@ -217,6 +243,79 @@ function sim_loop_cylic_expression_and_fit(n_replicates_seq = 1:8, n_sims::Int64
     write(joinpath(test_out_dir(), "simulation_infer_cylic_model_vary_replicates_PIP.csv"), res)
 
     return res
+end
+
+struct SimResult
+    thresh::Vector{Float64}
+    TP::Vector{Int64}
+    TPR::Vector{Float64}
+    FD::Vector{Int64}
+    FDR::Vector{Float64}
+end
+
+function push!(SimResult, true_edges, detected_edges, thresh)
+
+    TP = length(intersect(true_edges, detected_edges))
+    TPR = TP / length(true_edges)
+
+    FD = length(setdiff(detected_edges, true_edges))
+    FDR = FD / length(detected_edges)
+
+    push!(SimResult.thresh, thresh)
+    push!(SimResult.TP, TP)
+    push!(SimResult.TPR, TPR)
+    push!(SimResult.FD, FD)
+    push!(SimResult.FDR, FDR)
+end
+
+function filter_edges(d::DataFrame, thresh::Float64)
+    detected_rows = d[abs.(d.estimate) .> thresh, :]
+    return collect(zip(detected_rows.row, detected_rows.col))
+end
+
+function sim_compare_direct_to_total(n_replicates_seq = 1:5, n_sims::Int64 = 10)
+
+
+    truth = cyclic_chain_graph() .> 0
+    true_edges = parse_graph_to_edges(truth)
+
+    DirectResult = SimResult([], [], [], [], [])
+    TotalResult = SimResult([], [], [], [], [])
+
+    for n_replicates in n_replicates_seq
+        for i in 1:n_sims
+            for thresh in [.20, .30, .40]
+                @info "n_replicates = $n_replicates, i = $i, thresh = $thresh"
+                expression = sim_cyclic_expression(cyclic_chain_graph(), 3, n_replicates, true)
+                graph = interventionGraph(expression)
+                model_pars = get_model_params(false, .01, .01)
+                sampling_pars = get_sampling_params(true)
+                cyclic_matrices = get_cyclic_matrices(graph, true, true, true)
+                model = fit_cyclic_model(graph, false, model_pars, sampling_pars)
+                parsed_direct_effects = parse_cyclic_chain(
+                    model[1], model[2], cyclic_matrices[3]; targets=["gene_$i" for i in 1:graph.nv]
+                )
+                parsed_total_effects = parse_total_effect_estimates(graph)
+
+                push!(
+                    DirectResult,
+                    true_edges,
+                    filter_edges(parsed_direct_effects, thresh),
+                    thresh
+                )
+
+                push!(
+                    TotalResult,
+                    true_edges,
+                    filter_edges(parsed_total_effects, thresh),
+                    thresh
+                )
+
+            end
+        end 
+    end
+
+    return DirectResult, TotalResult
 end
 
 function sim_cyclic_expression(true_adjacency::Matrix{Float64}, n_donors::Int64 = 3, n_replicates_per_donor::Int64 = 50, include_controls=false)
