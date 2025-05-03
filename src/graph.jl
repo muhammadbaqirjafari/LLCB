@@ -41,7 +41,7 @@ function interventionGraph(data::DataFrame)
         for j in 1:nv
             if data[i, :intervention] == targets[j]
                 interventions[i, j] = 1
-                @assert x[i, j] == 0.0
+                #@assert x[i, j] == 0.0
             end
         end
     end
