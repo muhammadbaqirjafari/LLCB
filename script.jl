@@ -12,3 +12,6 @@ sampling_pars = get_sampling_params(false)
 model         = fit_cyclic_model(graph, false, model_pars, sampling_pars)
 edges         = get_cyclic_matrices(graph, false)[3]
 parsed_chain  = parse_cyclic_chain(model[1], model[2], edges)
+
+# Save parsed_chain
+CSV.write("parsed_chain.csv", parsed_chain)
